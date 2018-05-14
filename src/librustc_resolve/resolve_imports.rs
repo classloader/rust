@@ -131,14 +131,11 @@ impl<'a> Default for SingleImports<'a> {
 }
 
 impl<'a> SingleImports<'a> {
-    fn add_directive(&mut self, directive: &'a ImportDirective<'a>, use_extern_macros: bool) {
+    fn add_directive(&mut self, directive: &'a ImportDirective<'a>) {
         match *self {
             SingleImports::None => *self = SingleImports::MaybeOne(directive),
-            SingleImports::MaybeOne(directive_one) => *self = if use_extern_macros {
-                SingleImports::MaybeTwo(directive_one, directive)
-            } else {
-                SingleImports::AtLeastOne
-            },
+            SingleImports::MaybeOne(directive_one) =>
+                *self = SingleImports::MaybeTwo(directive_one, directive),
             // If three single imports can define the name in the namespace, we can assume that at
             // least one of them will define it since otherwise we'd get duplicate errors in one of
             // other namespaces.
@@ -348,7 +345,7 @@ impl<'a> Resolver<'a> {
             SingleImport { target, type_ns_only, .. } => {
                 self.per_ns(|this, ns| if !type_ns_only || ns == TypeNS {
                     let mut resolution = this.resolution(current_module, target, ns).borrow_mut();
-                    resolution.single_imports.add_directive(directive, this.use_extern_macros);
+                    resolution.single_imports.add_directive(directive);
                 });
             }
             // We don't add prelude imports to the globs since they only affect lexical scopes,

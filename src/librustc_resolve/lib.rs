@@ -1380,13 +1380,10 @@ pub struct Resolver<'a> {
     /// `use` injections for proc macros wrongly imported with #[macro_use]
     proc_mac_errors: Vec<macros::ProcMacError>,
 
-    gated_errors: FxHashSet<Span>,
     disallowed_shadowing: Vec<&'a LegacyBinding<'a>>,
 
     arenas: &'a ResolverArenas<'a>,
     dummy_binding: &'a NameBinding<'a>,
-    /// true if `#![feature(use_extern_macros)]`
-    use_extern_macros: bool,
 
     crate_loader: &'a mut CrateLoader,
     macro_names: FxHashSet<Ident>,
@@ -1698,7 +1695,6 @@ impl<'a> Resolver<'a> {
             ambiguity_errors: Vec::new(),
             use_injections: Vec::new(),
             proc_mac_errors: Vec::new(),
-            gated_errors: FxHashSet(),
             disallowed_shadowing: Vec::new(),
 
             arenas,
@@ -1708,10 +1704,6 @@ impl<'a> Resolver<'a> {
                 span: DUMMY_SP,
                 vis: ty::Visibility::Public,
             }),
-
-            // The `proc_macro` and `decl_macro` features imply `use_extern_macros`
-            use_extern_macros:
-                features.use_extern_macros || features.proc_macro || features.decl_macro,
 
             crate_loader,
             macro_names: FxHashSet(),
@@ -1753,9 +1745,7 @@ impl<'a> Resolver<'a> {
     fn per_ns<F: FnMut(&mut Self, Namespace)>(&mut self, mut f: F) {
         f(self, TypeNS);
         f(self, ValueNS);
-        if self.use_extern_macros {
-            f(self, MacroNS);
-        }
+        f(self, MacroNS);
     }
 
     fn macro_def(&self, mut ctxt: SyntaxContext) -> DefId {

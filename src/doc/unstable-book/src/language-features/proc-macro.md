@@ -17,8 +17,7 @@ The two new procedural macro kinds are:
 * Attribute-like procedural macros which can be applied to any item which built-in attributes can
 be applied to, and which can take arguments in their invocation as well.
 
-Additionally, this feature flag implicitly enables the [`use_extern_macros`](language-features/use-extern-macros.html) feature,
-which allows macros to be imported like any other item with `use` statements, as compared to 
+Procedural macros can be imported like any other item with `use` statements, as compared to
 applying `#[macro_use]` to an `extern crate` declaration. It is important to note that procedural macros may
 **only** be imported in this manner, and will throw an error otherwise.
 

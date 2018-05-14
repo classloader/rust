@@ -291,8 +291,6 @@ declare_features! (
     // Allows #[link(..., cfg(..))]
     (active, link_cfg, "1.14.0", Some(37406), None),
 
-    (active, use_extern_macros, "1.15.0", Some(35896), None),
-
     // `extern "ptx-*" fn()`
     (active, abi_ptx, "1.15.0", Some(38788), None),
 
@@ -509,7 +507,7 @@ declare_features! (
     (removed, advanced_slice_patterns, "1.0.0", Some(23121), None,
      Some("merged into `#![feature(slice_patterns)]`")),
     (removed, macro_reexport, "1.0.0", Some(29638), None,
-     Some("subsumed by `#![feature(use_extern_macros)]` and `pub use`")),
+     Some("subsumed by `pub use`")),
 );
 
 declare_features! (
@@ -624,6 +622,8 @@ declare_features! (
     (accepted, global_allocator, "1.28.0", Some(27389), None),
     // Allows `#[repr(transparent)]` attribute on newtype structs
     (accepted, repr_transparent, "1.28.0", Some(43036), None),
+    // Allows importing and reexporting macros with `use`.
+    (accepted, use_extern_macros, "1.29.0", Some(35896), None),
 );
 
 // If you change this, please modify src/doc/unstable-book as well. You must
