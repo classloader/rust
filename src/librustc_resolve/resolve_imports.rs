@@ -10,7 +10,7 @@
 
 use self::ImportDirectiveSubclass::*;
 
-use {AmbiguityError, CrateLint, Module, PerNS};
+use {AmbiguityError, AmbiguityErrorKind, CrateLint, Module, PerNS};
 use Namespace::{self, TypeNS, MacroNS};
 use {NameBinding, NameBindingKind, ToNameBinding, PathResult, PrivacyError};
 use Resolver;
@@ -18,14 +18,13 @@ use {names_to_string, module_to_string};
 use {resolve_error, ResolutionError};
 
 use rustc::ty;
-use rustc::lint::builtin::BuiltinLintDiagnostics;
-use rustc::lint::builtin::{DUPLICATE_MACRO_EXPORTS, PUB_USE_OF_PRIVATE_EXTERN_CRATE};
+use rustc::lint::builtin::{PUB_USE_OF_PRIVATE_EXTERN_CRATE};
 use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId};
 use rustc::hir::def::*;
 use rustc::session::DiagnosticMessageId;
-use rustc::util::nodemap::{FxHashMap, FxHashSet};
+use rustc::util::nodemap::FxHashSet;
 
-use syntax::ast::{Ident, Name, NodeId, CRATE_NODE_ID};
+use syntax::ast::{Ident, Name, NodeId};
 use syntax::ext::base::Determinacy::{self, Determined, Undetermined};
 use syntax::ext::hygiene::Mark;
 use syntax::symbol::keywords;
@@ -183,6 +182,7 @@ impl<'a> Resolver<'a> {
                                               record_used: bool,
                                               path_span: Span)
                                               -> Result<&'a NameBinding<'a>, Determinacy> {
+        let restricted_shadowing = restricted_shadowing || ns == MacroNS;
         self.populate_module_if_necessary(module);
 
         let resolution = self.resolution(module, ident, ns)
@@ -195,7 +195,7 @@ impl<'a> Resolver<'a> {
                     let name = ident.name;
                     // Forbid expanded shadowing to avoid time travel.
                     if restricted_shadowing &&
-                       binding.expansion != Mark::root() &&
+                       (binding.expansion != Mark::root() || binding.is_macro_export) &&
                        ns != MacroNS && // In MacroNS, `try_define` always forbids this shadowing
                        binding.def() != shadowed_glob.def() {
                         self.ambiguity_errors.push(AmbiguityError {
@@ -204,6 +204,7 @@ impl<'a> Resolver<'a> {
                             lexical: false,
                             b1: binding,
                             b2: shadowed_glob,
+                            kind: AmbiguityErrorKind::ResolveInModule,
                         });
                     }
                 }
@@ -241,7 +242,7 @@ impl<'a> Resolver<'a> {
                 SingleImport { source, .. } => source,
                 _ => unreachable!(),
             };
-            match this.resolve_ident_in_module(module, ident, ns, false, false, path_span) {
+            match this.resolve_ident_in_module(module, ident, ns, false, path_span) {
                 Err(Determined) => {}
                 _ => return false,
             }
@@ -282,7 +283,7 @@ impl<'a> Resolver<'a> {
             restricted_shadowing || module.unresolved_invocations.borrow().is_empty();
         match resolution.binding {
             // In `MacroNS`, expanded bindings do not shadow (enforced in `try_define`).
-            Some(binding) if no_unresolved_invocations || ns == MacroNS =>
+            Some(binding) if no_unresolved_invocations =>
                 return check_usable(self, binding),
             None if no_unresolved_invocations => {}
             _ => return Err(Undetermined),
@@ -383,6 +384,7 @@ impl<'a> Resolver<'a> {
             span: directive.span,
             vis,
             expansion: directive.expansion,
+            is_macro_export: false,
         })
     }
 
@@ -397,7 +399,8 @@ impl<'a> Resolver<'a> {
             if let Some(old_binding) = resolution.binding {
                 if binding.is_glob_import() {
                     if !old_binding.is_glob_import() &&
-                       !(ns == MacroNS && old_binding.expansion != Mark::root()) {
+                       !(ns == MacroNS && (old_binding.expansion != Mark::root() ||
+                                           old_binding.is_macro_export)) {
                         resolution.shadows_glob = Some(binding);
                     } else if binding.def() != old_binding.def() {
                         resolution.binding = Some(this.ambiguity(old_binding, binding));
@@ -406,7 +409,8 @@ impl<'a> Resolver<'a> {
                         resolution.binding = Some(binding);
                     }
                 } else if old_binding.is_glob_import() {
-                    if ns == MacroNS && binding.expansion != Mark::root() &&
+                    if ns == MacroNS && (binding.expansion != Mark::root() ||
+                                         binding.is_macro_export) &&
                        binding.def() != old_binding.def() {
                         resolution.binding = Some(this.ambiguity(binding, old_binding));
                     } else {
@@ -431,6 +435,7 @@ impl<'a> Resolver<'a> {
             vis: if b1.vis.is_at_least(b2.vis, self) { b1.vis } else { b2.vis },
             span: b1.span,
             expansion: Mark::root(),
+            is_macro_export: false,
         })
     }
 
@@ -627,7 +632,6 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                                                             source,
                                                             ns,
                                                             false,
-                                                            false,
                                                             directive.span));
             } else {
                 return
@@ -726,6 +730,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                             vis: directive.vis.get(),
                             span: directive.span,
                             expansion: directive.expansion,
+                            is_macro_export: false,
                         });
                         let _ = self.try_define(directive.parent, target, TypeNS, binding);
                         return None;
@@ -800,7 +805,7 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         if all_ns_err {
             let mut all_ns_failed = true;
             self.per_ns(|this, ns| if !type_ns_only || ns == TypeNS {
-                match this.resolve_ident_in_module(module, ident, ns, false, true, span) {
+                match this.resolve_ident_in_module(module, ident, ns, true, span) {
                     Ok(_) => all_ns_failed = false,
                     _ => {}
                 }
@@ -969,25 +974,6 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         *module.globs.borrow_mut() = Vec::new();
 
         let mut reexports = Vec::new();
-        let mut exported_macro_names = FxHashMap();
-        if module as *const _ == self.graph_root as *const _ {
-            let macro_exports = mem::replace(&mut self.macro_exports, Vec::new());
-            for export in macro_exports.into_iter().rev() {
-                if let Some(later_span) = exported_macro_names.insert(export.ident.modern(),
-                                                                      export.span) {
-                    self.session.buffer_lint_with_diagnostic(
-                        DUPLICATE_MACRO_EXPORTS,
-                        CRATE_NODE_ID,
-                        later_span,
-                        &format!("a macro named `{}` has already been exported", export.ident),
-                        BuiltinLintDiagnostics::DuplicatedMacroExports(
-                            export.ident, export.span, later_span));
-                } else {
-                    reexports.push(export);
-                }
-            }
-        }
-
         for (&(ident, ns), resolution) in module.resolutions.borrow().iter() {
             let resolution = &mut *resolution.borrow_mut();
             let binding = match resolution.binding {
@@ -1000,16 +986,6 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                 if def != Def::Err {
                     if !def.def_id().is_local() {
                         self.cstore.export_macros_untracked(def.def_id().krate);
-                    }
-                    if let Def::Macro(..) = def {
-                        if let Some(&span) = exported_macro_names.get(&ident.modern()) {
-                            let msg =
-                                format!("a macro named `{}` has already been exported", ident);
-                            self.session.struct_span_err(span, &msg)
-                                .span_label(span, format!("`{}` already exported", ident))
-                                .span_note(binding.span, "previous macro export here")
-                                .emit();
-                        }
                     }
                     reexports.push(Export {
                         ident: ident.modern(),

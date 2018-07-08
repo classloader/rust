@@ -15,7 +15,7 @@ note: `m` could also refer to the macro imported here
 LL |     use two_macros::m;
    |         ^^^^^^^^^^^^^
 
-error[E0659]: `m` is ambiguous
+error[E0659]: `m` is ambiguous RecordUse
   --> $DIR/macros.rs:26:5
    |
 LL |     m! { //~ ERROR ambiguous
@@ -33,7 +33,7 @@ LL |     use two_macros::*;
    |         ^^^^^^^^^^^^^
    = note: macro-expanded macro imports do not shadow
 
-error[E0659]: `m` is ambiguous
+error[E0659]: `m` is ambiguous ResolveLexical
   --> $DIR/macros.rs:39:9
    |
 LL |         m! { //~ ERROR ambiguous

@@ -9,7 +9,7 @@ LL |     m!();
    |
    = note: macro-expanded `macro_rules!`s may not shadow existing macros (see RFC 1560)
 
-error[E0659]: `panic` is ambiguous
+error[E0659]: `panic` is ambiguous ResolveLexical
   --> $DIR/shadow_builtin_macros.rs:25:14
    |
 LL |     fn f() { panic!(); } //~ ERROR ambiguous
@@ -23,7 +23,7 @@ LL |     use foo::*;
    = note: `panic` is also a builtin macro
    = note: consider adding an explicit import of `panic` to disambiguate
 
-error[E0659]: `panic` is ambiguous
+error[E0659]: `panic` is ambiguous ResolveLexical
   --> $DIR/shadow_builtin_macros.rs:30:14
    |
 LL |     fn f() { panic!(); } //~ ERROR ambiguous
@@ -37,7 +37,7 @@ LL |     ::two_macros::m!(use foo::panic;);
    = note: `panic` is also a builtin macro
    = note: macro-expanded macro imports do not shadow
 
-error[E0659]: `n` is ambiguous
+error[E0659]: `n` is ambiguous ResolveLexical
   --> $DIR/shadow_builtin_macros.rs:59:5
    |
 LL |     n!(); //~ ERROR ambiguous

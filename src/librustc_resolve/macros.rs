@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use {AmbiguityError, CrateLint, Resolver, ResolutionError, resolve_error};
+use {AmbiguityError, AmbiguityErrorKind, CrateLint, Resolver, ResolutionError, resolve_error};
 use {Module, ModuleKind, NameBinding, NameBindingKind, PathResult};
 use Namespace::{self, MacroNS};
 use build_reduced_graph::BuildReducedGraphVisitor;
 use resolve_imports::ImportResolver;
 use rustc::hir::def_id::{DefId, BUILTIN_MACROS_CRATE, CRATE_DEF_INDEX, DefIndex,
                          DefIndexAddressSpace};
-use rustc::hir::def::{Def, Export};
+use rustc::hir::def::Def;
 use rustc::hir::map::{self, DefCollector};
 use rustc::{ty, lint};
 use syntax::ast::{self, Name, Ident};
@@ -193,7 +193,9 @@ impl<'a> base::Resolver for Resolver<'a> {
 
         self.current_module = invocation.module.get();
         self.current_module.unresolved_invocations.borrow_mut().remove(&mark);
+        self.unresolved_invocations_macro_export.remove(&mark);
         self.current_module.unresolved_invocations.borrow_mut().extend(derives);
+        self.unresolved_invocations_macro_export.extend(derives);
         for &derive in derives {
             self.invocations.insert(derive, invocation);
         }
@@ -219,6 +221,7 @@ impl<'a> base::Resolver for Resolver<'a> {
             span: DUMMY_SP,
             vis: ty::Visibility::Invisible,
             expansion: Mark::root(),
+            is_macro_export: false,
         });
         self.global_macros.insert(ident.name, binding);
     }
@@ -552,11 +555,12 @@ impl<'a> Resolver<'a> {
                                 b1: shadower,
                                 b2: binding,
                                 lexical: true,
+                                kind: AmbiguityErrorKind::ResolveLexical,
                             });
                             return potential_illegal_shadower;
                         }
                     }
-                    if binding.expansion != Mark::root() ||
+                    if binding.expansion != Mark::root() || binding.is_macro_export ||
                        (binding.is_glob_import() && module.unwrap().def().is_some()) {
                         potential_illegal_shadower = result;
                     } else {
@@ -666,12 +670,16 @@ impl<'a> Resolver<'a> {
 
             match (legacy_resolution, resolution) {
                 (Some(MacroBinding::Legacy(legacy_binding)), Ok(MacroBinding::Modern(binding))) => {
-                    let msg1 = format!("`{}` could refer to the macro defined here", ident);
-                    let msg2 = format!("`{}` could also refer to the macro imported here", ident);
-                    self.session.struct_span_err(span, &format!("`{}` is ambiguous", ident))
-                        .span_note(legacy_binding.span, &msg1)
-                        .span_note(binding.span, &msg2)
-                        .emit();
+                    if legacy_binding.def_id != binding.def_ignoring_ambiguity().def_id() {
+                        let msg1 =
+                            format!("`{}` could refer to the macro defined here", ident);
+                        let msg2 =
+                            format!("`{}` could also refer to the macro imported here", ident);
+                        self.session.struct_span_err(span, &format!("`{}` is ambiguous", ident))
+                            .span_note(legacy_binding.span, &msg1)
+                            .span_note(binding.span, &msg2)
+                            .emit();
+                    }
                 },
                 (None, Err(_)) => {
                     assert!(def.is_none());
@@ -802,12 +810,9 @@ impl<'a> Resolver<'a> {
             let def = Def::Macro(def_id, MacroKind::Bang);
             self.all_macros.insert(ident.name, def);
             if attr::contains_name(&item.attrs, "macro_export") {
-                self.macro_exports.push(Export {
-                    ident: ident.modern(),
-                    def: def,
-                    vis: ty::Visibility::Public,
-                    span: item.span,
-                });
+                let module = self.graph_root;
+                let vis = ty::Visibility::Public;
+                self.define(module, ident, MacroNS, (def, vis, item.span, expansion, false));
             } else {
                 self.unused_macros.insert(def_id);
             }

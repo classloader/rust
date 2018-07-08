@@ -52,6 +52,7 @@ impl<'a> ToNameBinding<'a> for (Module<'a>, ty::Visibility, Span, Mark) {
             vis: self.1,
             span: self.2,
             expansion: self.3,
+            is_macro_export: false,
         })
     }
 }
@@ -63,6 +64,19 @@ impl<'a> ToNameBinding<'a> for (Def, ty::Visibility, Span, Mark) {
             vis: self.1,
             span: self.2,
             expansion: self.3,
+            is_macro_export: false,
+        })
+    }
+}
+
+impl<'a> ToNameBinding<'a> for (Def, ty::Visibility, Span, Mark, bool) {
+    fn to_name_binding(self, arenas: &'a ResolverArenas<'a>) -> &'a NameBinding<'a> {
+        arenas.alloc_name_binding(NameBinding {
+            kind: NameBindingKind::Def(self.0),
+            vis: self.1,
+            span: self.2,
+            expansion: self.3,
+            is_macro_export: self.4,
         })
     }
 }
@@ -674,8 +688,7 @@ impl<'a> Resolver<'a> {
         } else {
             for (name, span) in legacy_imports.imports {
                 let ident = Ident::with_empty_ctxt(name);
-                let result = self.resolve_ident_in_module(module, ident, MacroNS,
-                                                          false, false, span);
+                let result = self.resolve_ident_in_module(module, ident, MacroNS, false, span);
                 if let Ok(binding) = result {
                     let directive = macro_use_directive(span);
                     self.potentially_unused_imports.push(directive);
@@ -743,6 +756,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
     fn visit_invoc(&mut self, id: ast::NodeId) -> &'b InvocationData<'b> {
         let mark = id.placeholder_to_mark();
         self.resolver.current_module.unresolved_invocations.borrow_mut().insert(mark);
+        self.resolver.unresolved_invocations_macro_export.insert(mark);
         let invocation = self.resolver.invocations[&mark];
         invocation.module.set(self.resolver.current_module);
         invocation.legacy_scope.set(self.legacy_scope);
