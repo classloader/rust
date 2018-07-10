@@ -312,7 +312,7 @@
 #![feature(unboxed_closures)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
-#![feature(use_extern_macros)]
+#![cfg_attr(stage0, feature(use_extern_macros))]
 #![feature(vec_push_all)]
 #![feature(doc_cfg)]
 #![feature(doc_masked)]

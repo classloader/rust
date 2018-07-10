@@ -8,11 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(use_extern_macros)]
-
 pub use std::panic;
 
 #[macro_export]
-macro_rules! panic { () => {} } //~ ERROR a macro named `panic` has already been exported
+macro_rules! panic { () => {} } //~ ERROR the name `panic` is defined multiple times
 
 fn main() {}

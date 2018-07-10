@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use {AmbiguityError, CrateLint, Resolver, ResolutionError, resolve_error};
+use {AmbiguityError, AmbiguityErrorKind, CrateLint, Resolver, ResolutionError, resolve_error};
 use {Module, ModuleKind, NameBinding, NameBindingKind, PathResult};
 use Namespace::{self, MacroNS};
 use build_reduced_graph::BuildReducedGraphVisitor;
 use resolve_imports::ImportResolver;
 use rustc::hir::def_id::{DefId, BUILTIN_MACROS_CRATE, CRATE_DEF_INDEX, DefIndex,
                          DefIndexAddressSpace};
-use rustc::hir::def::{Def, Export};
+use rustc::hir::def::Def;
 use rustc::hir::map::{self, DefCollector};
 use rustc::{ty, lint};
 use syntax::ast::{self, Name, Ident};
@@ -193,7 +193,9 @@ impl<'a> base::Resolver for Resolver<'a> {
 
         self.current_module = invocation.module.get();
         self.current_module.unresolved_invocations.borrow_mut().remove(&mark);
+        self.unresolved_invocations_macro_export.remove(&mark);
         self.current_module.unresolved_invocations.borrow_mut().extend(derives);
+        self.unresolved_invocations_macro_export.extend(derives);
         for &derive in derives {
             self.invocations.insert(derive, invocation);
         }
@@ -219,6 +221,7 @@ impl<'a> base::Resolver for Resolver<'a> {
             span: DUMMY_SP,
             vis: ty::Visibility::Invisible,
             expansion: Mark::root(),
+            is_macro_export: false,
         });
         self.global_macros.insert(ident.name, binding);
     }
@@ -458,21 +461,13 @@ impl<'a> Resolver<'a> {
         self.current_module = if module.is_trait() { module.parent.unwrap() } else { module };
 
         // Possibly apply the macro helper hack
-        if self.use_extern_macros && kind == MacroKind::Bang && path.len() == 1 &&
+        if kind == MacroKind::Bang && path.len() == 1 &&
            path[0].span.ctxt().outer().expn_info().map_or(false, |info| info.local_inner_macros) {
             let root = Ident::new(keywords::DollarCrate.name(), path[0].span);
             path.insert(0, root);
         }
 
         if path.len() > 1 {
-            if !self.use_extern_macros && self.gated_errors.insert(span) {
-                let msg = "non-ident macro paths are experimental";
-                let feature = "use_extern_macros";
-                emit_feature_err(&self.session.parse_sess, feature, span, GateIssue::Language, msg);
-                self.found_unresolved_macro = true;
-                return Err(Determinacy::Determined);
-            }
-
             let def = match self.resolve_path(&path, Some(MacroNS), false, span, CrateLint::No) {
                 PathResult::NonModule(path_res) => match path_res.base_def() {
                     Def::Err => Err(Determinacy::Determined),
@@ -560,11 +555,12 @@ impl<'a> Resolver<'a> {
                                 b1: shadower,
                                 b2: binding,
                                 lexical: true,
+                                kind: AmbiguityErrorKind::ResolveLexical,
                             });
                             return potential_illegal_shadower;
                         }
                     }
-                    if binding.expansion != Mark::root() ||
+                    if binding.expansion != Mark::root() || binding.is_macro_export ||
                        (binding.is_glob_import() && module.unwrap().def().is_some()) {
                         potential_illegal_shadower = result;
                     } else {
@@ -588,7 +584,6 @@ impl<'a> Resolver<'a> {
                                 record_used: bool)
                                 -> Option<MacroBinding<'a>> {
         let ident = ident.modern();
-        let mut possible_time_travel = None;
         let mut relative_depth: u32 = 0;
         let mut binding = None;
         loop {
@@ -598,9 +593,6 @@ impl<'a> Resolver<'a> {
                     match invocation.expansion.get() {
                         LegacyScope::Invocation(_) => scope.set(invocation.legacy_scope.get()),
                         LegacyScope::Empty => {
-                            if possible_time_travel.is_none() {
-                                possible_time_travel = Some(scope);
-                            }
                             scope = &invocation.legacy_scope;
                         }
                         _ => {
@@ -615,7 +607,7 @@ impl<'a> Resolver<'a> {
                 }
                 LegacyScope::Binding(potential_binding) => {
                     if potential_binding.ident == ident {
-                        if (!self.use_extern_macros || record_used) && relative_depth > 0 {
+                        if record_used && relative_depth > 0 {
                             self.disallowed_shadowing.push(potential_binding);
                         }
                         binding = Some(potential_binding);
@@ -629,20 +621,10 @@ impl<'a> Resolver<'a> {
         let binding = if let Some(binding) = binding {
             MacroBinding::Legacy(binding)
         } else if let Some(binding) = self.global_macros.get(&ident.name).cloned() {
-            if !self.use_extern_macros {
-                self.record_use(ident, MacroNS, binding, DUMMY_SP);
-            }
             MacroBinding::Global(binding)
         } else {
             return None;
         };
-
-        if !self.use_extern_macros {
-            if let Some(scope) = possible_time_travel {
-                // Check for disallowed shadowing later
-                self.lexical_macro_resolutions.push((ident, scope));
-            }
-        }
 
         Some(binding)
     }
@@ -688,12 +670,16 @@ impl<'a> Resolver<'a> {
 
             match (legacy_resolution, resolution) {
                 (Some(MacroBinding::Legacy(legacy_binding)), Ok(MacroBinding::Modern(binding))) => {
-                    let msg1 = format!("`{}` could refer to the macro defined here", ident);
-                    let msg2 = format!("`{}` could also refer to the macro imported here", ident);
-                    self.session.struct_span_err(span, &format!("`{}` is ambiguous", ident))
-                        .span_note(legacy_binding.span, &msg1)
-                        .span_note(binding.span, &msg2)
-                        .emit();
+                    if legacy_binding.def_id != binding.def_ignoring_ambiguity().def_id() {
+                        let msg1 =
+                            format!("`{}` could refer to the macro defined here", ident);
+                        let msg2 =
+                            format!("`{}` could also refer to the macro imported here", ident);
+                        self.session.struct_span_err(span, &format!("`{}` is ambiguous", ident))
+                            .span_note(legacy_binding.span, &msg1)
+                            .span_note(binding.span, &msg2)
+                            .emit();
+                    }
                 },
                 (None, Err(_)) => {
                     assert!(def.is_none());
@@ -749,9 +735,6 @@ impl<'a> Resolver<'a> {
             find_best_match_for_name(names, name, None)
         // Then check modules.
         }).or_else(|| {
-            if !self.use_extern_macros {
-                return None;
-            }
             let is_macro = |def| {
                 if let Def::Macro(_, def_kind) = def {
                     def_kind == kind
@@ -827,12 +810,9 @@ impl<'a> Resolver<'a> {
             let def = Def::Macro(def_id, MacroKind::Bang);
             self.all_macros.insert(ident.name, def);
             if attr::contains_name(&item.attrs, "macro_export") {
-                self.macro_exports.push(Export {
-                    ident: ident.modern(),
-                    def: def,
-                    vis: ty::Visibility::Public,
-                    span: item.span,
-                });
+                let module = self.graph_root;
+                let vis = ty::Visibility::Public;
+                self.define(module, ident, MacroNS, (def, vis, item.span, expansion, false));
             } else {
                 self.unused_macros.insert(def_id);
             }

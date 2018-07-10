@@ -8,14 +8,22 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// `local_inner_macros` has no effect if `feature(use_extern_macros)` is not enabled
+// compile-pass
 
-// aux-build:local_inner_macros.rs
-// error-pattern: cannot find macro `helper2!` in this scope
+macro_rules! define_exported { () => {
+    #[macro_export]
+    macro_rules! exported {
+        () => ()
+    }
+}}
 
-#[macro_use(public_macro)]
-extern crate local_inner_macros;
+mod inner1 {
+    use super::*;
+    exported!();
+}
 
-public_macro!();
+mod inner2 {
+    define_exported!();
+}
 
 fn main() {}

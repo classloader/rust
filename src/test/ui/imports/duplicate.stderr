@@ -12,7 +12,7 @@ help: You can use `as` to change the binding name of the import
 LL |     use a::foo as other_foo; //~ ERROR the name `foo` is defined multiple times
    |         ^^^^^^^^^^^^^^^^^^^
 
-error[E0659]: `foo` is ambiguous
+error[E0659]: `foo` is ambiguous RecordUse
   --> $DIR/duplicate.rs:56:9
    |
 LL |     use self::foo::bar; //~ ERROR `foo` is ambiguous
@@ -30,7 +30,7 @@ LL |     use self::m2::*;
    |         ^^^^^^^^^^^
    = note: consider adding an explicit import of `foo` to disambiguate
 
-error[E0659]: `foo` is ambiguous
+error[E0659]: `foo` is ambiguous RecordUse
   --> $DIR/duplicate.rs:45:5
    |
 LL |     f::foo(); //~ ERROR `foo` is ambiguous
@@ -48,7 +48,7 @@ LL |     pub use b::*;
    |             ^^^^
    = note: consider adding an explicit import of `foo` to disambiguate
 
-error[E0659]: `foo` is ambiguous
+error[E0659]: `foo` is ambiguous RecordUse
   --> $DIR/duplicate.rs:46:5
    |
 LL |     g::foo(); //~ ERROR `foo` is ambiguous
@@ -66,7 +66,7 @@ LL |     pub use f::*;
    |             ^^^^
    = note: consider adding an explicit import of `foo` to disambiguate
 
-error[E0659]: `foo` is ambiguous
+error[E0659]: `foo` is ambiguous RecordUse
   --> $DIR/duplicate.rs:59:9
    |
 LL |         foo::bar(); //~ ERROR `foo` is ambiguous

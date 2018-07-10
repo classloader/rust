@@ -1100,6 +1100,7 @@ impl<'a> fmt::Debug for ModuleData<'a> {
 pub struct NameBinding<'a> {
     kind: NameBindingKind<'a>,
     expansion: Mark,
+    is_macro_export: bool,
     span: Span,
     vis: ty::Visibility,
 }
@@ -1141,12 +1142,20 @@ struct UseError<'a> {
     better: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AmbiguityErrorKind {
+    RecordUse,
+    ResolveLexical,
+    ResolveInModule,
+}
+
 struct AmbiguityError<'a> {
     span: Span,
     name: Name,
     lexical: bool,
     b1: &'a NameBinding<'a>,
     b2: &'a NameBinding<'a>,
+    kind: AmbiguityErrorKind,
 }
 
 impl<'a> NameBinding<'a> {
@@ -1380,13 +1389,10 @@ pub struct Resolver<'a> {
     /// `use` injections for proc macros wrongly imported with #[macro_use]
     proc_mac_errors: Vec<macros::ProcMacError>,
 
-    gated_errors: FxHashSet<Span>,
     disallowed_shadowing: Vec<&'a LegacyBinding<'a>>,
 
     arenas: &'a ResolverArenas<'a>,
     dummy_binding: &'a NameBinding<'a>,
-    /// true if `#![feature(use_extern_macros)]`
-    use_extern_macros: bool,
 
     crate_loader: &'a mut CrateLoader,
     macro_names: FxHashSet<Ident>,
@@ -1396,7 +1402,6 @@ pub struct Resolver<'a> {
     macro_map: FxHashMap<DefId, Lrc<SyntaxExtension>>,
     macro_defs: FxHashMap<Mark, DefId>,
     local_macro_def_scopes: FxHashMap<NodeId, Module<'a>>,
-    macro_exports: Vec<Export>,
     pub whitelisted_legacy_custom_derives: Vec<Name>,
     pub found_unresolved_macro: bool,
 
@@ -1429,6 +1434,9 @@ pub struct Resolver<'a> {
 
     /// Only supposed to be used by rustdoc, otherwise should be false.
     pub ignore_extern_prelude_feature: bool,
+
+    /// Macro invocations in the whole crate that can expand into a `#[macro_export] macro_rules`.
+    unresolved_invocations_macro_export: FxHashSet<Mark>,
 }
 
 /// Nothing really interesting here, it just provides memory for the rest of the crate.
@@ -1698,7 +1706,6 @@ impl<'a> Resolver<'a> {
             ambiguity_errors: Vec::new(),
             use_injections: Vec::new(),
             proc_mac_errors: Vec::new(),
-            gated_errors: FxHashSet(),
             disallowed_shadowing: Vec::new(),
 
             arenas,
@@ -1707,11 +1714,8 @@ impl<'a> Resolver<'a> {
                 expansion: Mark::root(),
                 span: DUMMY_SP,
                 vis: ty::Visibility::Public,
+                is_macro_export: false,
             }),
-
-            // The `proc_macro` and `decl_macro` features imply `use_extern_macros`
-            use_extern_macros:
-                features.use_extern_macros || features.proc_macro || features.decl_macro,
 
             crate_loader,
             macro_names: FxHashSet(),
@@ -1719,7 +1723,6 @@ impl<'a> Resolver<'a> {
             all_macros: FxHashMap(),
             lexical_macro_resolutions: Vec::new(),
             macro_map: FxHashMap(),
-            macro_exports: Vec::new(),
             invocations,
             macro_defs,
             local_macro_def_scopes: FxHashMap(),
@@ -1734,6 +1737,7 @@ impl<'a> Resolver<'a> {
             current_type_ascription: Vec::new(),
             injected_crate: None,
             ignore_extern_prelude_feature: false,
+            unresolved_invocations_macro_export: FxHashSet(),
         }
     }
 
@@ -1753,9 +1757,7 @@ impl<'a> Resolver<'a> {
     fn per_ns<F: FnMut(&mut Self, Namespace)>(&mut self, mut f: F) {
         f(self, TypeNS);
         f(self, ValueNS);
-        if self.use_extern_macros {
-            f(self, MacroNS);
-        }
+        f(self, MacroNS);
     }
 
     fn macro_def(&self, mut ctxt: SyntaxContext) -> DefId {
@@ -1807,6 +1809,7 @@ impl<'a> Resolver<'a> {
             NameBindingKind::Ambiguity { b1, b2 } => {
                 self.ambiguity_errors.push(AmbiguityError {
                     span, name: ident.name, lexical: false, b1, b2,
+                    kind: AmbiguityErrorKind::RecordUse
                 });
                 true
             }
@@ -1967,7 +1970,6 @@ impl<'a> Resolver<'a> {
                                module: Module<'a>,
                                mut ident: Ident,
                                ns: Namespace,
-                               ignore_unresolved_invocations: bool,
                                record_used: bool,
                                span: Span)
                                -> Result<&'a NameBinding<'a>, Determinacy> {
@@ -1977,7 +1979,7 @@ impl<'a> Resolver<'a> {
             self.current_module = self.macro_def_scope(def);
         }
         let result = self.resolve_ident_in_module_unadjusted(
-            module, ident, ns, ignore_unresolved_invocations, record_used, span,
+            module, ident, ns, false, record_used, span,
         );
         self.current_module = orig_current_module;
         result
@@ -2470,7 +2472,7 @@ impl<'a> Resolver<'a> {
         // If there is a TraitRef in scope for an impl, then the method must be in the
         // trait.
         if let Some((module, _)) = self.current_trait_ref {
-            if self.resolve_ident_in_module(module, ident, ns, false, false, span).is_err() {
+            if self.resolve_ident_in_module(module, ident, ns, false, span).is_err() {
                 let path = &self.current_trait_ref.as_ref().unwrap().1.path;
                 resolve_error(self, span, err(ident.name, &path_names_to_string(path)));
             }
@@ -3420,7 +3422,7 @@ impl<'a> Resolver<'a> {
             }
 
             let binding = if let Some(module) = module {
-                self.resolve_ident_in_module(module, ident, ns, false, record_used, path_span)
+                self.resolve_ident_in_module(module, ident, ns, record_used, path_span)
             } else if opt_ns == Some(MacroNS) {
                 self.resolve_lexical_macro_path_segment(ident, ns, record_used, path_span)
                     .map(MacroBinding::binding)
@@ -3714,7 +3716,7 @@ impl<'a> Resolver<'a> {
         // Look for associated items in the current trait.
         if let Some((module, _)) = self.current_trait_ref {
             if let Ok(binding) =
-                    self.resolve_ident_in_module(module, ident, ns, false, false, module.span) {
+                    self.resolve_ident_in_module(module, ident, ns, false, module.span) {
                 let def = binding.def();
                 if filter_fn(def) {
                     return Some(if self.has_self.contains(&def.def_id()) {
@@ -4027,7 +4029,7 @@ impl<'a> Resolver<'a> {
         let mut found_traits = Vec::new();
         // Look for the current trait.
         if let Some((module, _)) = self.current_trait_ref {
-            if self.resolve_ident_in_module(module, ident, ns, false, false, module.span).is_ok() {
+            if self.resolve_ident_in_module(module, ident, ns, false, module.span).is_ok() {
                 let def_id = module.def_id().unwrap();
                 found_traits.push(TraitCandidate { def_id: def_id, import_id: None });
             }
@@ -4300,7 +4302,7 @@ impl<'a> Resolver<'a> {
         self.report_proc_macro_import(krate);
         let mut reported_spans = FxHashSet();
 
-        for &AmbiguityError { span, name, b1, b2, lexical } in &self.ambiguity_errors {
+        for &AmbiguityError { span, name, b1, b2, lexical, kind } in &self.ambiguity_errors {
             if !reported_spans.insert(span) { continue }
             let participle = |binding: &NameBinding| {
                 if binding.is_import() { "imported" } else { "defined" }
@@ -4317,7 +4319,8 @@ impl<'a> Resolver<'a> {
                         if b1.is_import() { "imports" } else { "items" })
             };
 
-            let mut err = struct_span_err!(self.session, span, E0659, "`{}` is ambiguous", name);
+            let mut err = struct_span_err!(self.session, span, E0659,
+                                           "`{}` is ambiguous {:?}", name, kind);
             err.span_note(b1.span, &msg1);
             match b2.def() {
                 Def::Macro(..) if b2.span.is_dummy() =>
